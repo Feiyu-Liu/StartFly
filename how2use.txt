@@ -1,0 +1,1 @@
+python F103USART_RX.py -nolog -nograph -comid [comid] -savein [location]
