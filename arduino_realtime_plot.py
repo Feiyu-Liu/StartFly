@@ -30,26 +30,26 @@ class ArduinoDataReader:
     
     def read_data(self):
         """读取Arduino数据的线程函数"""
-        FRAME_SIZE = 4  # 0xAA + int16 + uint8 = 1 + 2 + 1 = 4字节
+        FRAME_SIZE = 5  # 0xAA + uint16(ADC) + uint16(timestamp) = 1 + 2 + 2 = 5字节
         
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting >= FRAME_SIZE:
                     header = self.ser.read(1)
                     if header == b'\xAA':
-                        raw = self.ser.read(3)  # 读取剩余的3字节
-                        val1 = struct.unpack("<h", raw[0:2])[0]  # 小端2字节有符号整数
-                        val2 = struct.unpack("<B", raw[2:3])[0]  # 1字节无符号整数
+                        raw = self.ser.read(4)  # 读取剩余的4字节
+                        val1 = struct.unpack("<H", raw[0:2])[0]  # 小端2字节无符号整数（ADC 0-1023）
+                        ts = struct.unpack("<H", raw[2:4])[0]   # 小端2字节无符号整数（Timer1计数）
                         
                         # 将数据放入队列
                         timestamp = time.time()
                         try:
-                            self.data_queue.put((timestamp, val1, val2), timeout=0.001)
+                            self.data_queue.put((timestamp, val1, ts), timeout=0.001)
                         except queue.Full:
                             # 如果队列满了，移除最旧的数据
                             try:
                                 self.data_queue.get_nowait()
-                                self.data_queue.put((timestamp, val1, val2), timeout=0.001)
+                                self.data_queue.put((timestamp, val1, ts), timeout=0.001)
                             except:
                                 pass
                     else:
@@ -84,7 +84,7 @@ class RealtimePlotter:
         # 数据缓冲区
         self.timestamps = deque(maxlen=max_points)
         self.val1_data = deque(maxlen=max_points)
-        self.val2_data = deque(maxlen=max_points)
+        self.ts_data = deque(maxlen=max_points)
         
         # 创建图形 - 使用单个子图和双Y轴
         self.fig, self.ax1 = plt.subplots(figsize=(12, 6))
@@ -93,7 +93,7 @@ class RealtimePlotter:
         
         # 初始化曲线
         self.line1, = self.ax1.plot([], [], 'b-', label='Analog (A0)', linewidth=2)
-        self.line2, = self.ax2.plot([], [], 'r-', label='Digital (D2)', linewidth=2)
+        self.line2, = self.ax2.plot([], [], 'r-', label='Trigger Timestamp (Timer1)', linewidth=2)
         
         # 设置坐标轴
         self.ax1.set_xlabel('Time (s)')
@@ -102,7 +102,7 @@ class RealtimePlotter:
         self.ax1.tick_params(axis='y', labelcolor='blue')
         self.ax1.grid(True, alpha=0.3)
         
-        self.ax2.set_ylabel('Digital Value (0-255)', color='red')
+        self.ax2.set_ylabel('Trigger Timestamp (ticks)', color='red')
         self.ax2.tick_params(axis='y', labelcolor='red')
         
         # 组合图例
@@ -125,17 +125,18 @@ class RealtimePlotter:
         
         # 如果有新数据，更新缓冲区
         if new_data:
-            for timestamp, val1, val2 in new_data:
+            for timestamp, val1, ts in new_data:
                 relative_time = timestamp - self.start_time
                 self.timestamps.append(relative_time)
                 self.val1_data.append(val1)
-                self.val2_data.append(val2)
+                # 将未触发的固定时间(0xFFFF)映射为NaN以便在图中显示间隙
+                self.ts_data.append(np.nan if ts == 0xFFFF else ts)
         
         # 更新曲线数据
         if len(self.timestamps) > 0:
             times = list(self.timestamps)
             self.line1.set_data(times, list(self.val1_data))
-            self.line2.set_data(times, list(self.val2_data))
+            self.line2.set_data(times, list(self.ts_data))
             
             # 更新坐标轴范围
             if len(times) > 1:
@@ -143,16 +144,16 @@ class RealtimePlotter:
                 if time_range > 0:
                     self.ax1.set_xlim(times[0], times[-1])
             
-            # 更新Y轴范围
-            if len(self.val2_data) > 0:
-                val2_min, val2_max = min(self.val2_data), max(self.val2_data)
-                # 数字值范围较小，使用固定范围或动态范围
-                if val2_max == val2_min:
-                    # 如果所有值相同，设置固定范围
-                    self.ax2.set_ylim(val2_min - 5, val2_min + 5)
-                else:
-                    val2_padding = max(2, (val2_max - val2_min) * 0.2)
-                    self.ax2.set_ylim(val2_min - val2_padding, val2_max + val2_padding)
+            # 更新Y轴范围（时间戳，忽略NaN）
+            if len(self.ts_data) > 0:
+                valid_ts = [v for v in self.ts_data if not np.isnan(v)]
+                if len(valid_ts) > 0:
+                    ts_min, ts_max = min(valid_ts), max(valid_ts)
+                    if ts_max == ts_min:
+                        self.ax2.set_ylim(max(0, ts_min - 5), ts_min + 5)
+                    else:
+                        ts_padding = max(2, (ts_max - ts_min) * 0.2)
+                        self.ax2.set_ylim(max(0, ts_min - ts_padding), ts_max + ts_padding)
         
         return [self.line1, self.line2]
     
