@@ -1,6 +1,5 @@
 
 #define SYNC_TTL_PIN 6
-#define TRIGGER_TTL_PIN 2   // 用于外部触发输入（Pin Change Interrupt）
 #define MAGNET_TTL_PIN 4    // 磁铁触发输出改为此引脚，避免与输入冲突
 
 
@@ -16,9 +15,10 @@ volatile uint16_t readIndex = 0;
 
 // 触发时间戳（Timer1计数器的16位值）
 #define DEFAULT_TIMESTAMP 0xFFFF
-volatile uint16_t lastTriggerStamp = DEFAULT_TIMESTAMP;
-volatile bool hasNewTrigger = false;     // 是否有新触发待打印
-volatile uint8_t triggerPrevState = 0;   // 上次引脚状态（用于检测上升沿）
+volatile uint16_t syncTimestamp = DEFAULT_TIMESTAMP;
+volatile uint16_t magnetTimestamp = DEFAULT_TIMESTAMP;
+volatile bool hasNewSync = false;
+volatile bool hasNewMagnet = false;
 
 enum MagnetState { IDLE, FIRING };
 MagnetState magnetState = IDLE;
@@ -41,37 +41,25 @@ ISR(ADC_vect) {
 
 // ------------------ 定时器中断 ------------------
 ISR(TIMER1_COMPA_vect) {
+  // 为保持采样率，手动更新下一次比较匹配的值。
+  // 这使得 TCNT1 可以自由运行（用于时间戳），同时我们仍能获得周期性中断。
+  OCR1A += (1000000ul / DEFAULT_PRINT_HZ) / 4; // 增加一个周期的滴答数
+
   // 每次定时触发 ADC 转换
   ADCSRA |= (1 << ADSC);
 }
 
-// ------------------ Pin Change 中断（检测 TRIGGER_TTL_PIN 上升沿） ------------------
-ISR(PCINT2_vect) {
-  // 端口D的引脚变化中断
-  uint8_t pind = PIND;
-  uint8_t currentState = (pind & (1 << PD4)) ? 1 : 0; // TRIGGER_TTL_PIN = D4
-  // 检测上升沿：从0变为1
-  if (currentState && !triggerPrevState) {
-    lastTriggerStamp = TCNT1;  // 读取Timer1当前计数（16位）
-    hasNewTrigger = true;
-  }
-  triggerPrevState = currentState;
-}
+
 
 // ------------------ 设置 ------------------
 void setup() {
   Serial.begin(230400);
-  pinMode(TRIGGER_TTL_PIN, INPUT);  // 用于外部触发输入
   pinMode(SYNC_TTL_PIN, OUTPUT);
   pinMode(MAGNET_TTL_PIN, OUTPUT);  // 磁铁触发输出
   digitalWrite(MAGNET_TTL_PIN, LOW);
   digitalWrite(SYNC_TTL_PIN, LOW);
 
-  // ---- 配置 Pin Change Interrupt 用于 TRIGGER_TTL_PIN(D4) ----
-  noInterrupts();
-  PCICR |= (1 << PCIE2);        // 使能 PORTD 的 Pin Change 中断
-  PCMSK2 |= (1 << PD4);         // 使能 D4 的中断监视（对应 PCINT20）
-  interrupts();
+
 
   // ---- ADC 初始化 ----
   ADMUX = (1 << REFS0);          // AVcc 参考电压
@@ -89,7 +77,6 @@ void setup() {
   unsigned int compareValue = (period_us / 4) - 1;  // 64 分频 → 4 µs/tick
   if (compareValue > 65535) compareValue = 65535;
   OCR1A = compareValue;
-  TCCR1B |= (1 << WGM12);              // CTC 模式
   TCCR1B |= (1 << CS11) | (1 << CS10); // 64 分频
   TIMSK1 |= (1 << OCIE1A);             // 启用比较中断
   interrupts();
@@ -103,9 +90,11 @@ void loop() {
     isStart = true;
     startTrialTime = millis();
     digitalWrite(SYNC_TTL_PIN, HIGH);
+    syncTimestamp = TCNT1;
+    hasNewSync = true;
     delay(10);
     digitalWrite(SYNC_TTL_PIN, LOW);
-  } else if (isStart && (millis() - startTrialTime) > 30000) {
+  } else if (isStart && (millis() - startTrialTime) > 12000) {
     isStart = false;
   }
 
@@ -114,30 +103,34 @@ void loop() {
     int val = dataBuffer[readIndex];
     readIndex = (readIndex + 1) % BUFFER_SIZE;
 
-    // 读取并消费一次触发时间戳（若无触发则使用固定值）
-    uint16_t stampToSend;
-    bool consumed = false;
+    uint16_t syncTsToSend = DEFAULT_TIMESTAMP;
+    uint16_t magnetTsToSend = DEFAULT_TIMESTAMP;
+
     noInterrupts();
-    if (hasNewTrigger) {
-      stampToSend = lastTriggerStamp;
-      hasNewTrigger = false; // 消费本次触发
-      consumed = true;
+    if (hasNewSync) {
+      syncTsToSend = syncTimestamp;
+      hasNewSync = false;
+    }
+    if (hasNewMagnet) {
+      magnetTsToSend = magnetTimestamp;
+      hasNewMagnet = false;
     }
     interrupts();
-    if (!consumed) {
-      stampToSend = DEFAULT_TIMESTAMP;
-    }
 
     Serial.write(0xAA);
     Serial.write(val & 0xFF);
     Serial.write((val >> 8) & 0xFF);
-    Serial.write(stampToSend & 0xFF);
-    Serial.write((stampToSend >> 8) & 0xFF);
+    Serial.write(syncTsToSend & 0xFF);
+    Serial.write((syncTsToSend >> 8) & 0xFF);
+    Serial.write(magnetTsToSend & 0xFF);
+    Serial.write((magnetTsToSend >> 8) & 0xFF);
 
     // 电磁铁触发逻辑
     if (magnetState == IDLE && isStart) {
       if (val > TRIGGER_THR_MAX || val < TRIGGER_THR_MIN) {
         digitalWrite(MAGNET_TTL_PIN, HIGH);
+        magnetTimestamp = TCNT1;
+        hasNewMagnet = true;
         fireStart = millis();
         magnetState = FIRING;
       }

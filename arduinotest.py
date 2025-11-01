@@ -3,7 +3,7 @@ import struct
 import time
 
 port = "COM5"   # ⚠️ 修改为你的Arduino串口号
-baudrate = 230400
+baudrate = 921600
 
 def monitor_arduino_frame_rate(duration=5):
     """
