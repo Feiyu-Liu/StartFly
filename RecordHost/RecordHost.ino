@@ -15,8 +15,8 @@ volatile uint16_t readIndex = 0;
 
 // 触发时间戳（Timer1计数器的16位值）
 #define DEFAULT_TIMESTAMP 0xFFFF
-volatile uint16_t syncTimestamp = DEFAULT_TIMESTAMP;
-volatile uint16_t magnetTimestamp = DEFAULT_TIMESTAMP;
+volatile unsigned long syncTimestamp = 0;
+volatile unsigned long magnetTimestamp = 0;
 volatile bool hasNewSync = false;
 volatile bool hasNewMagnet = false;
 
@@ -47,6 +47,18 @@ ISR(TIMER1_COMPA_vect) {
 
   // 每次定时触发 ADC 转换
   ADCSRA |= (1 << ADSC);
+
+  // The following logic is based on the user's request to use micros() in the ISR.
+  // Note: digitalRead() can be slow inside a high-frequency ISR and may miss brief pulses.
+  unsigned long currentMicros = micros();
+  if (digitalRead(SYNC_TTL_PIN) == HIGH && !hasNewSync) {
+    syncTimestamp = currentMicros;
+    hasNewSync = true;
+  }
+  if (digitalRead(MAGNET_TTL_PIN) == HIGH && !hasNewMagnet) {
+    magnetTimestamp = currentMicros;
+    hasNewMagnet = true;
+  }
 }
 
 
@@ -90,7 +102,7 @@ void loop() {
     isStart = true;
     startTrialTime = millis();
     digitalWrite(SYNC_TTL_PIN, HIGH);
-    syncTimestamp = TCNT1;
+    syncTimestamp = micros();
     hasNewSync = true;
     delay(10);
     digitalWrite(SYNC_TTL_PIN, LOW);
@@ -98,13 +110,15 @@ void loop() {
     isStart = false;
   }
 
+
+
   // 从环形缓冲区读取数据并发送
   while (readIndex != writeIndex) {
     int val = dataBuffer[readIndex];
     readIndex = (readIndex + 1) % BUFFER_SIZE;
 
-    uint16_t syncTsToSend = DEFAULT_TIMESTAMP;
-    uint16_t magnetTsToSend = DEFAULT_TIMESTAMP;
+    unsigned long syncTsToSend = 0;
+    unsigned long magnetTsToSend = 0;
 
     noInterrupts();
     if (hasNewSync) {
@@ -118,18 +132,15 @@ void loop() {
     interrupts();
 
     Serial.write(0xAA);
-    Serial.write(val & 0xFF);
-    Serial.write((val >> 8) & 0xFF);
-    Serial.write(syncTsToSend & 0xFF);
-    Serial.write((syncTsToSend >> 8) & 0xFF);
-    Serial.write(magnetTsToSend & 0xFF);
-    Serial.write((magnetTsToSend >> 8) & 0xFF);
+    Serial.write((uint8_t *)&val, sizeof(val));
+    Serial.write((uint8_t *)&syncTsToSend, sizeof(syncTsToSend));
+    Serial.write((uint8_t *)&magnetTsToSend, sizeof(magnetTsToSend));
 
     // 电磁铁触发逻辑
     if (magnetState == IDLE && isStart) {
       if (val > TRIGGER_THR_MAX || val < TRIGGER_THR_MIN) {
         digitalWrite(MAGNET_TTL_PIN, HIGH);
-        magnetTimestamp = TCNT1;
+        magnetTimestamp = micros();
         hasNewMagnet = true;
         fireStart = millis();
         magnetState = FIRING;

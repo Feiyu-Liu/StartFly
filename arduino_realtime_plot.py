@@ -32,8 +32,8 @@ class ArduinoDataReader:
             writer.writerow(['ADC', 'Sync Timestamp', 'Magnet Timestamp'])
             while True:
                 try:
-                    data = self.csv_queue.get(timeout=1)
-                    writer.writerow(data)
+                    timestamp, val1, sync_ts, magnet_ts = self.csv_queue.get(timeout=1)
+                    self.csv_writer.writerow([timestamp, val1, sync_ts, magnet_ts])
                     self.csv_queue.task_done()
                 except queue.Empty:
                     if not self.running:
@@ -54,15 +54,15 @@ class ArduinoDataReader:
     
     def read_data(self):
         """读取Arduino数据的线程函数"""
-        FRAME_SIZE = 7  # 0xAA + uint16(ADC) + uint16(sync_ts) + uint16(magnet_ts) = 7 bytes
+        FRAME_SIZE = 11  # 0xAA + uint16(ADC) + uint16(sync_ts) + uint16(magnet_ts) = 7 bytes
         
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting >= FRAME_SIZE:
                     header = self.ser.read(1)
                     if header == b'\xAA':
-                        raw = self.ser.read(6)
-                        val1, sync_ts, magnet_ts = struct.unpack("<HHH", raw)
+                        raw = self.ser.read(10) # 2 (ADC) + 4 (sync) + 4 (magnet)
+                        val1, sync_ts, magnet_ts = struct.unpack('<HLL', raw)
 
                         if sync_ts != 0xFFFF:
                             print(f"SYNC detected! Timestamp: {sync_ts}")
@@ -154,8 +154,8 @@ class RealtimePlotter:
                 relative_time = timestamp - self.start_time
                 self.timestamps.append(relative_time)
                 self.val1_data.append(val1)
-                self.sync_ts_data.append(np.nan if sync_ts == 0xFFFF else sync_ts)
-                self.magnet_ts_data.append(np.nan if magnet_ts == 0xFFFF else magnet_ts)
+                self.sync_ts_data.append(np.nan if sync_ts == 0 else sync_ts)
+                self.magnet_ts_data.append(np.nan if magnet_ts == 0 else magnet_ts)
         
         if len(self.timestamps) > 0:
             times = list(self.timestamps)
