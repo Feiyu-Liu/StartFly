@@ -67,9 +67,9 @@ class ArduinoDataReader:
             self.last_us16 = us16
         return self.us_base + us16
 
-    def _unwrap_event_us(self, evt16, cur_frame_us16):
-        """将事件携带的16位微秒转换到与当前帧同一时间基，返回None表示无事件。"""
-        if evt16 == 0xFFFE:
+    def _unwrap_event_us(self, evt16, cur_frame_us16, valid):
+        """将事件携带的16位微秒转换到与当前帧同一时间基，valid=False时返回None。"""
+        if not valid:
             return None
         # 如果事件的16位值不大于当前帧值，属于当前基；否则属于上一个基
         if evt16 <= cur_frame_us16:
@@ -79,20 +79,20 @@ class ArduinoDataReader:
     
     def read_data(self):
         """读取Arduino数据的线程函数"""
-        FRAME_SIZE = 9  # 0xAA + uint16(ADC) + uint16(sync_us) + uint16(magnet_us) + uint16(frame_us)
+        FRAME_SIZE = 10  # 0xAA + uint16(ADC) + uint16(sync_us) + uint16(magnet_us) + uint16(frame_us) + uint8(flags)
 
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting >= FRAME_SIZE:
                     header = self.ser.read(1)
                     if header == b'\xAA':
-                        raw = self.ser.read(8)
-                        val1, sync_us16, magnet_us16, frame_us16 = struct.unpack("<HHHH", raw)
+                        raw = self.ser.read(9)
+                        val1, sync_us16, magnet_us16, frame_us16, flags = struct.unpack("<HHHHB", raw)
 
                         # 展开为32位微秒
                         frame_us32 = self._unwrap_frame_us(frame_us16)
-                        sync_us32 = self._unwrap_event_us(sync_us16, frame_us16)
-                        magnet_us32 = self._unwrap_event_us(magnet_us16, frame_us16)
+                        sync_us32 = self._unwrap_event_us(sync_us16, frame_us16, bool(flags & 0x01))
+                        magnet_us32 = self._unwrap_event_us(magnet_us16, frame_us16, bool(flags & 0x02))
 
                         if sync_us32 is not None:
                             print(f"SYNC detected! Us: {sync_us32}")
@@ -162,7 +162,7 @@ class RealtimePlotter:
         self.ax1.legend(loc='upper left')
 
         self.line2, = self.ax2.plot([], [], 'g-', label='Sync Us')
-        self.ax2.set_ylabel('Sync Ms')
+        self.ax2.set_ylabel('Sync Us')
         self.ax2.legend(loc='upper left')
 
         self.line3, = self.ax3.plot([], [], 'r-', label='Magnet Us')

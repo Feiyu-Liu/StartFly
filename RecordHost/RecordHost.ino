@@ -18,6 +18,9 @@ volatile uint16_t readIndex = 0;
 
 // 无事件哨值：使用微秒低16位时的占位值（避免与0xFFFF混淆）
 #define DEFAULT_TIMESTAMP 0xFFFE
+// 事件标志位（bit0: Sync, bit1: Magnet）
+#define FLAG_SYNC   0x01
+#define FLAG_MAGNET 0x02
 volatile uint16_t syncTimestamp = DEFAULT_TIMESTAMP;
 volatile uint16_t magnetTimestamp = DEFAULT_TIMESTAMP;
 volatile bool hasNewSync = false;
@@ -106,17 +109,23 @@ void loop() {
 
     uint16_t syncTsToSend = DEFAULT_TIMESTAMP;
     uint16_t magnetTsToSend = DEFAULT_TIMESTAMP;
+    uint8_t flags = 0;
 
     noInterrupts();
-    if (hasNewSync) {
-      syncTsToSend = syncTimestamp;  // 此值现为 millis() 低16位
+    bool syncFlagLocal = hasNewSync;
+    bool magnetFlagLocal = hasNewMagnet;
+    if (syncFlagLocal) {
+      syncTsToSend = syncTimestamp;  // 此值为 micros() 低16位
       hasNewSync = false;
     }
-    if (hasNewMagnet) {
-      magnetTsToSend = magnetTimestamp;  // 此值现为 millis() 低16位
+    if (magnetFlagLocal) {
+      magnetTsToSend = magnetTimestamp;  // 此值为 micros() 低16位
       hasNewMagnet = false;
     }
     interrupts();
+
+    if (syncFlagLocal) flags |= FLAG_SYNC;
+    if (magnetFlagLocal) flags |= FLAG_MAGNET;
 
     Serial.write(0xAA);
     Serial.write(val & 0xFF);
@@ -130,6 +139,7 @@ void loop() {
     uint16_t frameAbsUs = (uint16_t)micros();
     Serial.write(frameAbsUs & 0xFF);
     Serial.write((frameAbsUs >> 8) & 0xFF);
+    Serial.write(flags);
 
     // 电磁铁触发逻辑
     if (magnetState == IDLE && isStart) {
