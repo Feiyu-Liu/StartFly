@@ -11,22 +11,20 @@ import csv
 from datetime import datetime
 
 class ArduinoDataReader:
-    def __init__(self, port="COM5", baudrate=921600, save_to_csv=False):
+    def __init__(self, port="COM5", baudrate=921600, save_to_csv=False, start_delay_s=2):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
-        self.data_queue = queue.Queue(maxsize=3000)
+        self.data_queue = queue.Queue(maxsize=1000)
         self.running = False
+        self.start_delay_s = start_delay_s
 
         self.save_to_csv = save_to_csv
         if self.save_to_csv:
-            self.csv_queue = queue.Queue(maxsize=30000)
+            self.csv_queue = queue.Queue(maxsize=30000) # 注意修改
             self.csv_filename = f"arduino_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             self.csv_thread = threading.Thread(target=self._csv_writer, daemon=True)
 
-        # 用于将16位micros()展开为单调递增的32位微秒
-        self.last_us16 = None
-        self.us_base = 0  # 累积回绕的基数（每次加65536）
 
     def _csv_writer(self):
         """一个将队列中的数据写入CSV文件的线程。"""
@@ -54,43 +52,23 @@ class ArduinoDataReader:
             print(f"连接失败: {e}")
             return False
 
-    def _unwrap_frame_us(self, us16):
-        """将帧携带的16位微秒展开为32位绝对微秒。"""
-        if self.last_us16 is None:
-            self.last_us16 = us16
-        else:
-            # 检测回绕：当前值小于上一帧值（16位微秒约每65.536ms回绕）
-            if us16 < self.last_us16:
-                self.us_base += 65536
-            self.last_us16 = us16
-        return self.us_base + us16
-
-    def _unwrap_event_us(self, evt16, cur_frame_us16, valid):
-        """将事件携带的16位微秒转换到与当前帧同一时间基，valid=False时返回None。"""
-        if not valid:
-            return None
-        # 如果事件的16位值不大于当前帧值，属于当前基；否则属于上一个基
-        if evt16 <= cur_frame_us16:
-            return self.us_base + evt16
-        else:
-            return (self.us_base - 65536) + evt16
+    # 发送端改为32位微秒时间戳后，不再需要16位展开逻辑
     
     def read_data(self):
         """读取Arduino数据的线程函数"""
-        FRAME_SIZE = 10  # 0xAA + uint16(ADC) + uint16(sync_us) + uint16(magnet_us) + uint16(frame_us) + uint8(flags)
+        FRAME_SIZE = 16  # 0xAA + uint16(ADC) + uint32(sync_us) + uint32(magnet_us) + uint32(frame_us) + uint8(flags)
 
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting >= FRAME_SIZE:
                     header = self.ser.read(1)
                     if header == b'\xAA':
-                        raw = self.ser.read(9)
-                        val1, sync_us16, magnet_us16, frame_us16, flags = struct.unpack("<HHHHB", raw)
+                        raw = self.ser.read(15)
+                        val1, sync_us32_raw, magnet_us32_raw, frame_us32, flags = struct.unpack("<HIIIB", raw)
 
-                        # 展开为32位微秒
-                        frame_us32 = self._unwrap_frame_us(frame_us16)
-                        sync_us32 = self._unwrap_event_us(sync_us16, frame_us16, bool(flags & 0x01))
-                        magnet_us32 = self._unwrap_event_us(magnet_us16, frame_us16, bool(flags & 0x02))
+                        # 根据标志位判定事件是否有效
+                        sync_us32 = None if not (flags & 0x01) else (sync_us32_raw if sync_us32_raw != 0 else None)
+                        magnet_us32 = None if not (flags & 0x02) else (magnet_us32_raw if magnet_us32_raw != 0 else None)
 
                         csv_row_to_queue = None
                         if self.save_to_csv:
@@ -121,21 +99,31 @@ class ArduinoDataReader:
                 time.sleep(0.001)
     
     def start(self):
-        """启动数据读取和CSV写入线程"""
+        """启动数据读取和CSV写入线程,并延迟发送启动信号"""
         if self.connect():
-            # 先开启CSV写入，再触发Arduino发送数据
             self.running = True
             if self.save_to_csv:
                 self.csv_thread.start()
 
-            # 等待设备复位稳定后再发送启动信号
-            time.sleep(2)
-            self.ser.write(b'\n')
-            print("已发送换行符，开始数据传输...")
-
-            # 最后启动读取线程
+            # 立即启动读取线程，这样可以立刻开始绘图和保存
             self.read_thread = threading.Thread(target=self.read_data, daemon=True)
             self.read_thread.start()
+            print("数据读取、保存和绘图已立即开始...")
+
+            # 启动一个独立的线程来延迟发送换行符
+            def delayed_send():
+                print(f"将在 {self.start_delay_s} 秒后发送启动信号 (换行符)...")
+                time.sleep(self.start_delay_s)
+                if self.running and self.ser:
+                    try:
+                        self.ser.write(b'\n')
+                        print("启动信号 (换行符) 已发送。")
+                    except Exception as e:
+                        print(f"发送启动信号失败: {e}")
+
+            send_thread = threading.Thread(target=delayed_send, daemon=True)
+            send_thread.start()
+
             return True
         return False
     
@@ -171,13 +159,18 @@ class RealtimePlotter:
         self.ax1.set_ylim(0, 1023)
         self.ax1.legend(loc='upper left')
 
-        self.line2, = self.ax2.plot([], [], 'g-', label='Sync Us')
-        self.ax2.set_ylabel('Sync Us')
+        # Use vertical lines for event timestamps
+        self.line2, = self.ax2.plot([], [], 'g-', linewidth=2, label='Sync Event')
+        self.ax2.set_ylabel('Sync Event')
+        self.ax2.set_ylim(0, 1)
+        self.ax2.set_yticks([]) # Hide y-axis ticks
         self.ax2.legend(loc='upper left')
 
-        self.line3, = self.ax3.plot([], [], 'r-', label='Magnet Us')
+        self.line3, = self.ax3.plot([], [], 'r-', linewidth=2, label='Magnet Event')
         self.ax3.set_xlabel('Time (s)')
-        self.ax3.set_ylabel('Magnet Us')
+        self.ax3.set_ylabel('Magnet Event')
+        self.ax3.set_ylim(0, 1)
+        self.ax3.set_yticks([]) # Hide y-axis ticks
         self.ax3.legend(loc='upper left')
         
     
@@ -196,27 +189,33 @@ class RealtimePlotter:
                 t_seconds = frame_us32 / 1_000_000.0
                 self.timestamps.append(t_seconds)
                 self.val1_data.append(val1)
-                self.sync_ts_data.append(np.nan if sync_us32 is None else sync_us32)
-                self.magnet_ts_data.append(np.nan if magnet_us32 is None else magnet_us32)
+                # For events, store a 1, otherwise NaN
+                self.sync_ts_data.append(1 if sync_us32 is not None else np.nan)
+                self.magnet_ts_data.append(1 if magnet_us32 is not None else np.nan)
         
             if len(self.timestamps) > 0:
                 times = list(self.timestamps)
                 self.line1.set_data(times, list(self.val1_data))
-                self.line2.set_data(times, list(self.sync_ts_data))
-                self.line3.set_data(times, list(self.magnet_ts_data))
+
+                # Build data for vertical lines for sync events
+                sync_x, sync_y = [], []
+                for t, y_val in zip(times, self.sync_ts_data):
+                    if not np.isnan(y_val):
+                        sync_x.extend([t, t, np.nan])
+                        sync_y.extend([0, 1, np.nan])
+                self.line2.set_data(sync_x, sync_y)
+
+                # Build data for vertical lines for magnet events
+                magnet_x, magnet_y = [], []
+                for t, y_val in zip(times, self.magnet_ts_data):
+                    if not np.isnan(y_val):
+                        magnet_x.extend([t, t, np.nan])
+                        magnet_y.extend([0, 1, np.nan])
+                self.line3.set_data(magnet_x, magnet_y)
                 
                 if len(times) > 1:
                     self.ax1.set_xlim(times[0], times[-1])
-                    self.ax2.set_xlim(times[0], times[-1])
-                    self.ax3.set_xlim(times[0], times[-1])
-
-                valid_sync_ts = [v for v in self.sync_ts_data if not np.isnan(v)]
-                if len(valid_sync_ts) > 0:
-                    self.ax2.set_ylim(min(valid_sync_ts) - 1000, max(valid_sync_ts) + 1000)  # 预留±1ms可视范围
-
-                valid_magnet_ts = [v for v in self.magnet_ts_data if not np.isnan(v)]
-                if len(valid_magnet_ts) > 0:
-                    self.ax3.set_ylim(min(valid_magnet_ts) - 1000, max(valid_magnet_ts) + 1000)  # 预留±1ms可视范围
+                    # The x-axis is shared, so this is sufficient
         
         return [self.line1, self.line2, self.line3]
     
@@ -229,8 +228,16 @@ class RealtimePlotter:
 
 def main():
     """Main function"""
+    # --- 可配置参数 ---
+    SERIAL_PORT = "/dev/tty.usbmodem11401"
+    BAUD_RATE = 921600
+    SAVE_TO_CSV = True
+    START_DELAY_SECONDS = 7  # 在此处修改启动延迟
+    # ------------------
+
     # Create data reader
-    reader = ArduinoDataReader(port="/dev/tty.usbmodem11401", baudrate=921600, save_to_csv=True)
+    reader = ArduinoDataReader(port=SERIAL_PORT, baudrate=BAUD_RATE, 
+                               save_to_csv=SAVE_TO_CSV, start_delay_s=START_DELAY_SECONDS)
     
     # 启动数据读取
     if not reader.start():

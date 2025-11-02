@@ -10,11 +10,11 @@ import os
 import sys
 
 # --- Matplotlib (optional import) ---
-# 仅在需要绘图时才导入，避免在无图形界面环境中出错
+# Import only when plotting is needed to avoid errors in headless environments
 plt = None
 animation = None
 
-# --- 帧结构定义 (与STM32代码严格匹配) ---
+# --- Frame Structure Definition (must match STM32 code) ---
 FRAME_HEADER = b'\xA5\x5A'
 EXPECTED_PAYLOAD_SIZE = 1292
 NUM_CHANNELS = 10
@@ -23,7 +23,7 @@ PAYLOAD_UNPACK_FORMAT = f'<{SAMPLES_PER_PACKET * NUM_CHANNELS}H III'
 PLOT_BUFFER_SIZE = 512
 BAUD_RATE = 921600
 
-# --- 全局变量 ---
+# --- Global Variables ---
 data_lock = threading.Lock()
 plot_buffers = [deque(maxlen=PLOT_BUFFER_SIZE) for _ in range(NUM_CHANNELS)]
 stop_event = threading.Event()
@@ -32,33 +32,25 @@ last_sync_ts = 0
 last_trigger_ts = 0
 LOGGING_ENABLED = True
 
-# --- 辅助函数 ---
+# --- Helper Functions ---
 def logger(message):
-    """根据全局标志决定是否打印日志信息。"""
+    """Prints log messages based on the global flag."""
     if LOGGING_ENABLED:
         print(message, flush=True)
 
-def configure_matplotlib_for_chinese():
-    """配置Matplotlib以支持中文显示。"""
-    try:
-        plt.rcParams['font.sans-serif'] = ['SimHei']
-        plt.rcParams['axes.unicode_minus'] = False
-    except Exception as e:
-        logger(f"中文字体 'SimHei' 设置失败, 请确保已安装该字体。错误: {e}")
-
-# --- 核心功能 ---
+# --- Core Functions ---
 def read_serial_data(com_port, csv_filepath):
     """
-    在独立线程中运行，解析数据流，写入CSV，并根据日志开关打印信息。
+    Runs in a separate thread, parses the data stream, writes to CSV, and prints info based on the logging switch.
     """
     global packets_received, last_sync_ts, last_trigger_ts
     try:
         ser = serial.Serial(com_port, BAUD_RATE, timeout=1)
-        logger(f"成功打开串口 {com_port}...")
+        logger(f"Successfully opened serial port {com_port}...")
     except serial.SerialException as e:
-        print(f"致命错误: 无法打开串口 {com_port}。请检查设备连接或端口号。", file=sys.stderr)
+        print(f"Fatal Error: Could not open serial port {com_port}. Please check the connection or port number.", file=sys.stderr)
         print(e, file=sys.stderr)
-        stop_event.set() # 发送停止信号以终止主程序
+        stop_event.set() # Send stop signal to terminate the main program
         return
 
     try:
@@ -66,9 +58,9 @@ def read_serial_data(com_port, csv_filepath):
         csv_writer = csv.writer(csv_file)
         header = [f'adc{i}' for i in range(NUM_CHANNELS)] + ['send_timestamp_us', 'sync_ttl_timestamp_us', 'trigger_ttl_timestamp_us']
         csv_writer.writerow(header)
-        logger(f"数据将记录到: {csv_filepath}")
+        logger(f"Data will be logged to: {csv_filepath}")
     except IOError as e:
-        print(f"致命错误: 无法写入CSV文件路径 '{csv_filepath}'。请检查权限或路径。", file=sys.stderr)
+        print(f"Fatal Error: Could not write to CSV file path '{csv_filepath}'. Please check permissions or path.", file=sys.stderr)
         print(e, file=sys.stderr)
         ser.close()
         stop_event.set()
@@ -76,7 +68,7 @@ def read_serial_data(com_port, csv_filepath):
 
     sync_state = 0
     while not stop_event.is_set():
-        # --- 同步状态机 ---
+        # --- Synchronization State Machine ---
         byte = ser.read(1)
         if not byte: continue
         
@@ -95,10 +87,10 @@ def read_serial_data(com_port, csv_filepath):
                         unpacked_data = struct.unpack(PAYLOAD_UNPACK_FORMAT, payload)
                         adc_values_flat, send_ts, sync_ts, trigger_ts = unpacked_data[:-3], unpacked_data[-3], unpacked_data[-2], unpacked_data[-1]
                         if sync_ts != 0xFFFFFFFF:
-                            logger(f"--- SYNC TTL 触发 --- 时间戳: {sync_ts} us")
+                            logger(f"--- SYNC TTL Triggered --- Timestamp: {sync_ts} us")
                             last_sync_ts = sync_ts
                         if trigger_ts != 0xFFFFFFFF:
-                            logger(f"--- TRIGGER TTL 触发 --- 时间戳: {trigger_ts} us")
+                            logger(f"--- TRIGGER TTL Triggered --- Timestamp: {trigger_ts} us")
                             last_trigger_ts = trigger_ts
                         adc_array = np.array(adc_values_flat).reshape(SAMPLES_PER_PACKET, NUM_CHANNELS).T
                         for i in range(SAMPLES_PER_PACKET):
@@ -108,85 +100,84 @@ def read_serial_data(com_port, csv_filepath):
                             for i in range(NUM_CHANNELS):
                                 plot_buffers[i].extend(adc_array[i])
                     except struct.error:
-                        logger("载荷解析失败。重新同步...")
+                        logger("Payload parsing failed. Resynchronizing...")
                 else:
-                    logger("载荷读取不完整。重新同步...")
+                    logger("Incomplete payload read. Resynchronizing...")
             else:
-                logger("长度字段错误。重新同步...")
+                logger("Incorrect length field. Resynchronizing...")
             sync_state = 0
         else:
             sync_state = 0
 
     ser.close()
     csv_file.close()
-    logger("串口已关闭，文件已保存。")
+    logger("Serial port closed, file saved.")
 
 def update_plot(frame, lines, ax, title_text, ts_text):
-    """更新绘图的回调函数。"""
+    """Callback function to update the plot."""
     with data_lock:
         for i, line in enumerate(lines):
             line.set_data(range(len(plot_buffers[i])), plot_buffers[i])
-    title_text.set_text(f'STM32 ADC 实时数据流 (已接收: {packets_received} 包)')
+    title_text.set_text(f'STM32 ADC Real-time Data Stream (Packets Received: {packets_received})')
     ts_text.set_text(f'Sync TTL: {last_sync_ts if last_sync_ts != 0 else "N/A"} | Trigger TTL: {last_trigger_ts if last_trigger_ts != 0 else "N/A"}')
     ax.relim()
     ax.autoscale_view(scalex=False, scaley=True)
     return lines + [title_text, ts_text]
 
 def main():
-    """主函数，解析参数，初始化并启动所有流程。"""
+    """Main function, parses arguments, initializes and starts all processes."""
     global LOGGING_ENABLED, plt, animation
 
-    # --- 1. 参数解析 ---
-    parser = argparse.ArgumentParser(description="从STM32设备接收、记录并可选地显示ADC数据。")
-    parser.add_argument('-nograph', action='store_true', help='无图形界面模式，不显示实时绘图窗口。')
-    parser.add_argument('-nolog', action='store_true', help='无日志模式，不在控制台打印触发事件等信息。')
-    parser.add_argument('-comid', type=str, default='COM7', help='指定串口号 (例如: COM7 或 /dev/ttyUSB0)。')
-    parser.add_argument('-savein', type=str, default=None, help='指定CSV日志文件的保存目录。默认为脚本当前目录。')
+    # --- 1. Argument Parsing ---
+    parser = argparse.ArgumentParser(description="Receive, log, and optionally display ADC data from an STM32 device.")
+    parser.add_argument('-nograph', action='store_true', help='No GUI mode, do not display the real-time plot window.')
+    parser.add_argument('-nolog', action='store_true', help='No log mode, do not print trigger events, etc. to the console.')
+    parser.add_argument('-comid', type=str, default='COM7', help='Specify the serial port (e.g., COM7 or /dev/ttyUSB0).')
+    parser.add_argument('-savein', type=str, default=None, help="Specify the save directory for the CSV log file. Defaults to the script's current directory.")
     args = parser.parse_args()
 
-    # --- 2. 应用参数 ---
+    # --- 2. Apply Arguments ---
     if args.nolog:
         LOGGING_ENABLED = False
 
-    # --- 3. 处理文件保存路径 ---
+    # --- 3. Handle File Save Path ---
     csv_filename = f'data_log_{time.strftime("%Y%m%d_%H%M%S")}.csv'
     if args.savein:
         save_dir = os.path.abspath(args.savein)
         try:
             if not os.path.isdir(save_dir):
-                logger(f"目录 '{save_dir}' 不存在，正在尝试创建...")
+                logger(f"Directory '{save_dir}' does not exist, attempting to create...")
                 os.makedirs(save_dir, exist_ok=True)
             csv_filepath = os.path.join(save_dir, csv_filename)
         except OSError as e:
-            print(f"致命错误: 无法创建目录 '{save_dir}'。请检查权限。错误: {e}", file=sys.stderr)
+            print(f"Fatal Error: Could not create directory '{save_dir}'. Please check permissions. Error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
         csv_filepath = csv_filename
 
-    # --- 4. 启动核心逻辑 ---
+    # --- 4. Start Core Logic ---
     serial_thread = threading.Thread(target=read_serial_data, args=(args.comid, csv_filepath), daemon=True)
     serial_thread.start()
 
-    # --- 5. 根据模式选择前台任务 (GUI 或 无头等待) ---
+    # --- 5. Select Foreground Task (GUI or Headless Wait) ---
     if not args.nograph:
-        # --- GUI模式 ---
+        # --- GUI Mode ---
         try:
             global plt, animation
             import matplotlib.pyplot as plt
             import matplotlib.animation as animation
         except ImportError:
-            print("致命错误: 缺少matplotlib库，无法显示图形。请运行'pip install matplotlib'或使用'-nograph'模式。", file=sys.stderr)
+            print("Fatal Error: matplotlib library not found, cannot display graphics. Please run 'pip install matplotlib' or use '-nograph' mode.", file=sys.stderr)
             stop_event.set()
             serial_thread.join()
             sys.exit(1)
 
-        configure_matplotlib_for_chinese()
         fig, ax = plt.subplots(figsize=(15, 8))
         plt.subplots_adjust(bottom=0.1, top=0.9)
-        title_text = ax.set_title('STM32 ADC 实时数据流 (等待数据...)', fontsize=16)
+        title_text = ax.set_title('STM32 ADC Real-time Data Stream (Waiting for data...)', fontsize=16)
         ts_text = ax.text(0.01, 0.95, '', transform=ax.transAxes, fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
-        ax.set_xlabel('采样点 (最近512个)', fontsize=12)
-        ax.set_ylabel('ADC读数 (0-4095)', fontsize=12)
+        ax.set_xlabel('Sample Points (last 512)', fontsize=12)
+        ax.set_ylabel('ADC Reading (0-4095)', fontsize=12)
         ax.set_xlim(0, PLOT_BUFFER_SIZE)
         ax.set_ylim(0, 4096)
         ax.grid(True)
@@ -197,25 +188,25 @@ def main():
         ani = animation.FuncAnimation(fig, update_plot, fargs=(lines, ax, title_text, ts_text), interval=50, blit=True)
 
         def on_close(event):
-            logger("绘图窗口关闭，正在停止程序...")
+            logger("Plot window closed, stopping program...")
             stop_event.set()
 
         fig.canvas.mpl_connect('close_event', on_close)
         plt.show()
     else:
-        # --- 无头模式 (Headless) ---
-        logger("进入无图形界面模式。按 Ctrl+C 停止。")
+        # --- Headless Mode ---
+        logger("Entering headless mode. Press Ctrl+C to stop.")
         try:
-            # 保持主线程活动，直到串口线程因错误退出或收到外部信号
+            # Keep the main thread alive until the serial thread exits due to an error or an external signal
             while serial_thread.is_alive():
                 time.sleep(0.5)
         except KeyboardInterrupt:
-            logger("接收到 Ctrl+C，正在停止程序...")
+            logger("Received Ctrl+C, stopping program...")
             stop_event.set()
     
-    # --- 6. 清理 ---
+    # --- 6. Cleanup ---
     serial_thread.join(timeout=2)
-    logger("程序已退出。")
+    logger("Program exited.")
 
 if __name__ == '__main__':
     main()
