@@ -15,12 +15,12 @@ class ArduinoDataReader:
         self.port = port
         self.baudrate = baudrate
         self.ser = None
-        self.data_queue = queue.Queue(maxsize=1000)
+        self.data_queue = queue.Queue(maxsize=3000)
         self.running = False
 
         self.save_to_csv = save_to_csv
         if self.save_to_csv:
-            self.csv_queue = queue.Queue(maxsize=10000)
+            self.csv_queue = queue.Queue(maxsize=30000)
             self.csv_filename = f"arduino_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             self.csv_thread = threading.Thread(target=self._csv_writer, daemon=True)
 
@@ -48,9 +48,7 @@ class ArduinoDataReader:
         """连接Arduino并发送换行符"""
         try:
             self.ser = serial.Serial(self.port, self.baudrate, timeout=0.01)
-            time.sleep(2)
-            self.ser.write(b'\n')
-            print(f"已连接到 {self.port}，发送换行符启动数据传输...")
+            print(f"已连接到 {self.port}")
             return True
         except Exception as e:
             print(f"连接失败: {e}")
@@ -94,17 +92,21 @@ class ArduinoDataReader:
                         sync_us32 = self._unwrap_event_us(sync_us16, frame_us16, bool(flags & 0x01))
                         magnet_us32 = self._unwrap_event_us(magnet_us16, frame_us16, bool(flags & 0x02))
 
+                        csv_row_to_queue = None
+                        if self.save_to_csv:
+                            csv_row_to_queue = (frame_us32, val1,
+                                                0 if sync_us32 is None else sync_us32,
+                                                0 if magnet_us32 is None else magnet_us32)
+
                         if sync_us32 is not None:
-                            print(f"SYNC detected! Us: {sync_us32}")
+                            print(f"SYNC detected! Us: {sync_us32}. Preparing CSV row: {csv_row_to_queue}")
                         if magnet_us32 is not None:
                             print(f"MAGNET detected! Us: {magnet_us32}")
 
                         try:
                             self.data_queue.put((frame_us32, val1, sync_us32, magnet_us32), timeout=0.001)
                             if self.save_to_csv:
-                                self.csv_queue.put((frame_us32, val1,
-                                                    "" if sync_us32 is None else sync_us32,
-                                                    "" if magnet_us32 is None else magnet_us32))
+                                self.csv_queue.put(csv_row_to_queue)
                         except queue.Full:
                             # 丢弃最老数据并重试
                             try:
@@ -121,11 +123,19 @@ class ArduinoDataReader:
     def start(self):
         """启动数据读取和CSV写入线程"""
         if self.connect():
+            # 先开启CSV写入，再触发Arduino发送数据
             self.running = True
-            self.read_thread = threading.Thread(target=self.read_data, daemon=True)
-            self.read_thread.start()
             if self.save_to_csv:
                 self.csv_thread.start()
+
+            # 等待设备复位稳定后再发送启动信号
+            time.sleep(2)
+            self.ser.write(b'\n')
+            print("已发送换行符，开始数据传输...")
+
+            # 最后启动读取线程
+            self.read_thread = threading.Thread(target=self.read_data, daemon=True)
+            self.read_thread.start()
             return True
         return False
     
