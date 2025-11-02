@@ -9,9 +9,10 @@ import numpy as np
 from collections import deque
 import csv
 from datetime import datetime
+import argparse
 
 class ArduinoDataReader:
-    def __init__(self, port="COM5", baudrate=921600, save_to_csv=False, start_delay_s=2):
+    def __init__(self, port, baudrate=921600, save_to_csv=False, start_delay_s=2):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
@@ -228,16 +229,15 @@ class RealtimePlotter:
 
 def main():
     """Main function"""
-    # --- 可配置参数 ---
-    SERIAL_PORT = "/dev/tty.usbmodem11401"
-    BAUD_RATE = 921600
-    SAVE_TO_CSV = True
-    START_DELAY_SECONDS = 7  # 在此处修改启动延迟
-    # ------------------
+    parser = argparse.ArgumentParser(description="Arduino Real-time Data Monitor")
+    parser.add_argument("--port", required=True, help="Serial port for the Arduino (e.g., /dev/tty.usbmodem11401 or COM5)")
+    parser.add_argument("--no-csv", action="store_true", help="Disable saving data to a CSV file")
+    parser.add_argument("--delay", type=int, default=7, help="Delay in seconds before sending the start signal")
+    args = parser.parse_args()
 
     # Create data reader
-    reader = ArduinoDataReader(port=SERIAL_PORT, baudrate=BAUD_RATE, 
-                               save_to_csv=SAVE_TO_CSV, start_delay_s=START_DELAY_SECONDS)
+    reader = ArduinoDataReader(port=args.port, 
+                               save_to_csv=not args.no_csv, start_delay_s=args.delay)
     
     # 启动数据读取
     if not reader.start():
