@@ -13,6 +13,8 @@ import tkinter as tk
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse as urlparse
 
 class ArduinoDataReader:
     def __init__(self, port, baudrate=921600, save_to_csv=False, start_delay_s=2, csv_dir=None):
@@ -450,6 +452,52 @@ class STM32Plotter:
         except Exception:
             pass
 
+class ControlRequestHandler(BaseHTTPRequestHandler):
+    app_ref = None
+
+    def _ok(self, content='OK'):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        try:
+            self.wfile.write(content.encode('utf-8'))
+        except Exception:
+            pass
+
+    def log_message(self, format, *args):
+        # 静默HTTP日志，避免干扰控制台
+        return
+
+    def do_GET(self):
+        parsed = urlparse.urlparse(self.path)
+        path = parsed.path
+        app = ControlRequestHandler.app_ref
+        if app is None:
+            self._ok('NO_APP')
+            return
+
+        if path == '/start_all':
+            # 通过Tk主线程调度，安全触发UI回调
+            app.root.after(0, lambda: (not app.is_running) and app.toggle_run())
+            self._ok('STARTED')
+        elif path == '/stop_all':
+            app.root.after(0, lambda: app.is_running and app.toggle_run())
+            self._ok('STOPPED')
+        elif path == '/status':
+            stm32_running = bool(getattr(app, 'stm32_reader', None) and app.stm32_reader.running)
+            status = f"arduino={app.is_running}, stm32={stm32_running}"
+            self._ok(status)
+        else:
+            self.send_error(404, 'Not Found')
+
+def start_control_server(app, port=8765):
+    ControlRequestHandler.app_ref = app
+    server = HTTPServer(('127.0.0.1', port), ControlRequestHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    print(f'控制服务已启动: http://127.0.0.1:{port}')
+    return server
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -511,6 +559,13 @@ class App:
 
         # 关闭窗口时清理资源
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
+
+        # 启动HTTP控制服务（允许MATLAB远程控制开始/停止）
+        try:
+            ctrl_port = int(os.environ.get('PY_UI_CTRL_PORT', '8765'))
+        except Exception:
+            ctrl_port = 8765
+        self.ctrl_server = start_control_server(self, ctrl_port)
 
     def parse_bool_text(self, s):
         v = (s or '').strip().lower()
@@ -656,6 +711,13 @@ class App:
                     self.stm32_reader.stop()
             except Exception:
                 pass
+        # 关闭HTTP控制服务
+        try:
+            if hasattr(self, 'ctrl_server') and self.ctrl_server:
+                self.ctrl_server.shutdown()
+                self.ctrl_server.server_close()
+        except Exception:
+            pass
         self.root.destroy()
 
 def main():
