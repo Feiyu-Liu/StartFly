@@ -11,25 +11,29 @@ import csv
 from datetime import datetime
 
 class ArduinoDataReader:
-    def __init__(self, port="COM5", baudrate=230400, save_to_csv=False):
+    def __init__(self, port="COM5", baudrate=921600, save_to_csv=False):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
         self.data_queue = queue.Queue(maxsize=1000)
         self.running = False
-        
+
         self.save_to_csv = save_to_csv
         if self.save_to_csv:
             self.csv_queue = queue.Queue(maxsize=10000)
             self.csv_filename = f"arduino_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             self.csv_thread = threading.Thread(target=self._csv_writer, daemon=True)
 
+        # 用于将16位micros()展开为单调递增的32位微秒
+        self.last_us16 = None
+        self.us_base = 0  # 累积回绕的基数（每次加65536）
+
     def _csv_writer(self):
         """一个将队列中的数据写入CSV文件的线程。"""
         print(f"开始将数据实时保存到 {self.csv_filename}")
         with open(self.csv_filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['ADC', 'Sync Timestamp', 'Magnet Timestamp'])
+            writer.writerow(['FrameUs', 'ADC', 'SyncUs', 'MagnetUs'])
             while True:
                 try:
                     data = self.csv_queue.get(timeout=1)
@@ -51,34 +55,62 @@ class ArduinoDataReader:
         except Exception as e:
             print(f"连接失败: {e}")
             return False
+
+    def _unwrap_frame_us(self, us16):
+        """将帧携带的16位微秒展开为32位绝对微秒。"""
+        if self.last_us16 is None:
+            self.last_us16 = us16
+        else:
+            # 检测回绕：当前值小于上一帧值（16位微秒约每65.536ms回绕）
+            if us16 < self.last_us16:
+                self.us_base += 65536
+            self.last_us16 = us16
+        return self.us_base + us16
+
+    def _unwrap_event_us(self, evt16, cur_frame_us16):
+        """将事件携带的16位微秒转换到与当前帧同一时间基，返回None表示无事件。"""
+        if evt16 == 0xFFFE:
+            return None
+        # 如果事件的16位值不大于当前帧值，属于当前基；否则属于上一个基
+        if evt16 <= cur_frame_us16:
+            return self.us_base + evt16
+        else:
+            return (self.us_base - 65536) + evt16
     
     def read_data(self):
         """读取Arduino数据的线程函数"""
-        FRAME_SIZE = 7  # 0xAA + uint16(ADC) + uint16(sync_ts) + uint16(magnet_ts) = 7 bytes
-        
+        FRAME_SIZE = 9  # 0xAA + uint16(ADC) + uint16(sync_us) + uint16(magnet_us) + uint16(frame_us)
+
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting >= FRAME_SIZE:
                     header = self.ser.read(1)
                     if header == b'\xAA':
-                        raw = self.ser.read(6)
-                        val1, sync_ts, magnet_ts = struct.unpack("<HHH", raw)
+                        raw = self.ser.read(8)
+                        val1, sync_us16, magnet_us16, frame_us16 = struct.unpack("<HHHH", raw)
 
-                        if sync_ts != 0xFFFF:
-                            print(f"SYNC detected! Timestamp: {sync_ts}")
-                        if magnet_ts != 0xFFFF:
-                            print(f"MAGNET detected! Timestamp: {magnet_ts}")
+                        # 展开为32位微秒
+                        frame_us32 = self._unwrap_frame_us(frame_us16)
+                        sync_us32 = self._unwrap_event_us(sync_us16, frame_us16)
+                        magnet_us32 = self._unwrap_event_us(magnet_us16, frame_us16)
 
-                        timestamp = time.time()
+                        if sync_us32 is not None:
+                            print(f"SYNC detected! Us: {sync_us32}")
+                        if magnet_us32 is not None:
+                            print(f"MAGNET detected! Us: {magnet_us32}")
+
                         try:
-                            self.data_queue.put((timestamp, val1, sync_ts, magnet_ts), timeout=0.001)
+                            self.data_queue.put((frame_us32, val1, sync_us32, magnet_us32), timeout=0.001)
                             if self.save_to_csv:
-                                self.csv_queue.put((val1, sync_ts, magnet_ts))
+                                self.csv_queue.put((frame_us32, val1,
+                                                    "" if sync_us32 is None else sync_us32,
+                                                    "" if magnet_us32 is None else magnet_us32))
                         except queue.Full:
+                            # 丢弃最老数据并重试
                             try:
                                 self.data_queue.get_nowait()
-                                self.data_queue.put((timestamp, val1, ts), timeout=0.001)
-                            except:
+                                self.data_queue.put((frame_us32, val1, sync_us32, magnet_us32), timeout=0.001)
+                            except Exception:
                                 pass
                     else:
                         continue
@@ -115,30 +147,29 @@ class RealtimePlotter:
     def __init__(self, data_reader, max_points=1000):
         self.data_reader = data_reader
         self.max_points = max_points
-        
+
         self.timestamps = deque(maxlen=max_points)
         self.val1_data = deque(maxlen=max_points)
         self.sync_ts_data = deque(maxlen=max_points)
         self.magnet_ts_data = deque(maxlen=max_points)
-        
+
         self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
         self.fig.suptitle('Arduino Real-time Data Monitor')
-        
+
         self.line1, = self.ax1.plot([], [], 'b-', label='Analog (A0)')
         self.ax1.set_ylabel('Analog Value')
         self.ax1.set_ylim(0, 1023)
         self.ax1.legend(loc='upper left')
 
-        self.line2, = self.ax2.plot([], [], 'g-', label='Sync Timestamp')
-        self.ax2.set_ylabel('Sync TS')
+        self.line2, = self.ax2.plot([], [], 'g-', label='Sync Us')
+        self.ax2.set_ylabel('Sync Ms')
         self.ax2.legend(loc='upper left')
 
-        self.line3, = self.ax3.plot([], [], 'r-', label='Magnet Timestamp')
+        self.line3, = self.ax3.plot([], [], 'r-', label='Magnet Us')
         self.ax3.set_xlabel('Time (s)')
-        self.ax3.set_ylabel('Magnet TS')
+        self.ax3.set_ylabel('Magnet Us')
         self.ax3.legend(loc='upper left')
         
-        self.start_time = time.time()
     
     def update_plot(self, frame):
         new_data = []
@@ -150,31 +181,32 @@ class RealtimePlotter:
                 break
         
         if new_data:
-            for timestamp, val1, sync_ts, magnet_ts in new_data:
-                relative_time = timestamp - self.start_time
-                self.timestamps.append(relative_time)
+            for frame_us32, val1, sync_us32, magnet_us32 in new_data:
+                # 以Arduino的微秒为时间轴（秒）
+                t_seconds = frame_us32 / 1_000_000.0
+                self.timestamps.append(t_seconds)
                 self.val1_data.append(val1)
-                self.sync_ts_data.append(np.nan if sync_ts == 0xFFFF else sync_ts)
-                self.magnet_ts_data.append(np.nan if magnet_ts == 0xFFFF else magnet_ts)
+                self.sync_ts_data.append(np.nan if sync_us32 is None else sync_us32)
+                self.magnet_ts_data.append(np.nan if magnet_us32 is None else magnet_us32)
         
-        if len(self.timestamps) > 0:
-            times = list(self.timestamps)
-            self.line1.set_data(times, list(self.val1_data))
-            self.line2.set_data(times, list(self.sync_ts_data))
-            self.line3.set_data(times, list(self.magnet_ts_data))
-            
-            if len(times) > 1:
-                self.ax1.set_xlim(times[0], times[-1])
-                self.ax2.set_xlim(times[0], times[-1])
-                self.ax3.set_xlim(times[0], times[-1])
+            if len(self.timestamps) > 0:
+                times = list(self.timestamps)
+                self.line1.set_data(times, list(self.val1_data))
+                self.line2.set_data(times, list(self.sync_ts_data))
+                self.line3.set_data(times, list(self.magnet_ts_data))
+                
+                if len(times) > 1:
+                    self.ax1.set_xlim(times[0], times[-1])
+                    self.ax2.set_xlim(times[0], times[-1])
+                    self.ax3.set_xlim(times[0], times[-1])
 
-            valid_sync_ts = [v for v in self.sync_ts_data if not np.isnan(v)]
-            if len(valid_sync_ts) > 0:
-                self.ax2.set_ylim(min(valid_sync_ts) - 10, max(valid_sync_ts) + 10)
+                valid_sync_ts = [v for v in self.sync_ts_data if not np.isnan(v)]
+                if len(valid_sync_ts) > 0:
+                    self.ax2.set_ylim(min(valid_sync_ts) - 1000, max(valid_sync_ts) + 1000)  # 预留±1ms可视范围
 
-            valid_magnet_ts = [v for v in self.magnet_ts_data if not np.isnan(v)]
-            if len(valid_magnet_ts) > 0:
-                self.ax3.set_ylim(min(valid_magnet_ts) - 10, max(valid_magnet_ts) + 10)
+                valid_magnet_ts = [v for v in self.magnet_ts_data if not np.isnan(v)]
+                if len(valid_magnet_ts) > 0:
+                    self.ax3.set_ylim(min(valid_magnet_ts) - 1000, max(valid_magnet_ts) + 1000)  # 预留±1ms可视范围
         
         return [self.line1, self.line2, self.line3]
     
@@ -188,7 +220,7 @@ class RealtimePlotter:
 def main():
     """Main function"""
     # Create data reader
-    reader = ArduinoDataReader(port="COM5", baudrate=230400, save_to_csv=True)
+    reader = ArduinoDataReader(port="/dev/tty.usbmodem11401", baudrate=921600, save_to_csv=True)
     
     # 启动数据读取
     if not reader.start():

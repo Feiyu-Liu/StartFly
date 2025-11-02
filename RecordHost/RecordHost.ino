@@ -1,4 +1,7 @@
 
+#include <Arduino.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
 #define SYNC_TTL_PIN 6
 #define MAGNET_TTL_PIN 4    // 磁铁触发输出改为此引脚，避免与输入冲突
 
@@ -13,8 +16,8 @@ volatile int dataBuffer[BUFFER_SIZE];
 volatile uint16_t writeIndex = 0;
 volatile uint16_t readIndex = 0;
 
-// 触发时间戳（Timer1计数器的16位值）
-#define DEFAULT_TIMESTAMP 0xFFFF
+// 无事件哨值：使用微秒低16位时的占位值（避免与0xFFFF混淆）
+#define DEFAULT_TIMESTAMP 0xFFFE
 volatile uint16_t syncTimestamp = DEFAULT_TIMESTAMP;
 volatile uint16_t magnetTimestamp = DEFAULT_TIMESTAMP;
 volatile bool hasNewSync = false;
@@ -53,13 +56,11 @@ ISR(TIMER1_COMPA_vect) {
 
 // ------------------ 设置 ------------------
 void setup() {
-  Serial.begin(230400);
+  Serial.begin(921600);
   pinMode(SYNC_TTL_PIN, OUTPUT);
   pinMode(MAGNET_TTL_PIN, OUTPUT);  // 磁铁触发输出
   digitalWrite(MAGNET_TTL_PIN, LOW);
   digitalWrite(SYNC_TTL_PIN, LOW);
-
-
 
   // ---- ADC 初始化 ----
   ADMUX = (1 << REFS0);          // AVcc 参考电压
@@ -90,7 +91,7 @@ void loop() {
     isStart = true;
     startTrialTime = millis();
     digitalWrite(SYNC_TTL_PIN, HIGH);
-    syncTimestamp = TCNT1;
+    syncTimestamp = (uint16_t)micros();  // 改为 micros() 低16位，仅下一帧发送一次
     hasNewSync = true;
     delay(10);
     digitalWrite(SYNC_TTL_PIN, LOW);
@@ -108,11 +109,11 @@ void loop() {
 
     noInterrupts();
     if (hasNewSync) {
-      syncTsToSend = syncTimestamp;
+      syncTsToSend = syncTimestamp;  // 此值现为 millis() 低16位
       hasNewSync = false;
     }
     if (hasNewMagnet) {
-      magnetTsToSend = magnetTimestamp;
+      magnetTsToSend = magnetTimestamp;  // 此值现为 millis() 低16位
       hasNewMagnet = false;
     }
     interrupts();
@@ -125,11 +126,16 @@ void loop() {
     Serial.write(magnetTsToSend & 0xFF);
     Serial.write((magnetTsToSend >> 8) & 0xFF);
 
+    // 每帧的绝对微秒（micros() 低16位）
+    uint16_t frameAbsUs = (uint16_t)micros();
+    Serial.write(frameAbsUs & 0xFF);
+    Serial.write((frameAbsUs >> 8) & 0xFF);
+
     // 电磁铁触发逻辑
     if (magnetState == IDLE && isStart) {
       if (val > TRIGGER_THR_MAX || val < TRIGGER_THR_MIN) {
         digitalWrite(MAGNET_TTL_PIN, HIGH);
-        magnetTimestamp = TCNT1;
+        magnetTimestamp = (uint16_t)micros();  // 改为 micros() 低16位，仅下一帧发送一次
         hasNewMagnet = true;
         fireStart = millis();
         magnetState = FIRING;
