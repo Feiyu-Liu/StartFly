@@ -315,7 +315,7 @@ class RealtimePlotter:
         self.sync_ts_data = deque(maxlen=max_points)
         self.magnet_ts_data = deque(maxlen=max_points)
 
-        self.fig = Figure(figsize=(12, 8))
+        self.fig = Figure(figsize=(7, 5))
         self.ax1 = self.fig.add_subplot(3, 1, 1)
         self.ax2 = self.fig.add_subplot(3, 1, 2, sharex=self.ax1)
         self.ax3 = self.fig.add_subplot(3, 1, 3, sharex=self.ax1)
@@ -401,7 +401,7 @@ class RealtimePlotter:
 class STM32Plotter:
     def __init__(self, data_reader):
         self.data_reader = data_reader
-        self.fig = Figure(figsize=(12, 6))
+        self.fig = Figure(figsize=(7, 3))
         self.ax = self.fig.add_subplot(1, 1, 1)
 
         self.ax.set_xlabel('Sample Points (last 512)')
@@ -521,7 +521,7 @@ class App:
         ttk.Label(control_frame, text='port').grid(row=0, column=0, sticky='w')
         self.port_entry = ttk.Entry(control_frame, width=30)
         self.port_entry.grid(row=0, column=1, padx=5)
-        self.port_entry.insert(0, '/dev/tty.usbmodem11401')
+        self.port_entry.insert(0, 'COM5')
 
         # 输入：no-csv (文本框，填写 0/1 或 true/false)
         ttk.Label(control_frame, text='no-csv').grid(row=0, column=2, sticky='w')
@@ -533,7 +533,7 @@ class App:
         ttk.Label(control_frame, text='delay(s)').grid(row=0, column=4, sticky='w')
         self.delay_entry = ttk.Entry(control_frame, width=8)
         self.delay_entry.grid(row=0, column=5, padx=5)
-        self.delay_entry.insert(0, '7')
+        self.delay_entry.insert(0, '4')
 
         # 开始/停止按钮
         self.start_button = ttk.Button(control_frame, text='开始', command=self.toggle_run)
@@ -549,7 +549,7 @@ class App:
         ttk.Label(control_frame, text='stm32_port').grid(row=2, column=0, sticky='w')
         self.stm32_port_entry = ttk.Entry(control_frame, width=30)
         self.stm32_port_entry.grid(row=2, column=1, padx=5)
-        self.stm32_port_entry.insert(0, '/dev/tty.usbmodem11401')
+        self.stm32_port_entry.insert(0, 'COM14')
 
         # 绘图区域：Arduino 在上，STM32 在下
         self.plot_frame = ttk.Frame(self.root)
