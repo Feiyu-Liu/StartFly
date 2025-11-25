@@ -122,6 +122,17 @@ class ArduinoDataReader:
         if self.connect():
             self.running = True
             if self.save_to_csv:
+                self.csv_queue = queue.Queue(maxsize=30000)
+                dir_path = self.csv_dir.strip() if (self.csv_dir and isinstance(self.csv_dir, str)) else os.getcwd()
+                try:
+                    os.makedirs(dir_path, exist_ok=True)
+                except Exception as e:
+                    print(f"创建CSV目录失败，改用当前目录: {e}")
+                    dir_path = os.getcwd()
+
+                file_name = f"arduino_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                self.csv_filename = os.path.join(dir_path, file_name)
+                self.csv_thread = threading.Thread(target=self._csv_writer, daemon=True)
                 self.csv_thread.start()
 
             # 立即启动读取线程，这样可以立刻开始绘图和保存
@@ -149,16 +160,29 @@ class ArduinoDataReader:
     def stop(self):
         """停止数据读取和写入"""
         self.running = False
-        if self.read_thread:
-            self.read_thread.join(timeout=1)
-        
-        if self.save_to_csv and self.csv_thread:
-            print("等待数据写入完成...")
-            self.csv_queue.join()
-            self.csv_thread.join(timeout=2)
+        try:
+            if hasattr(self, 'read_thread') and self.read_thread:
+                self.read_thread.join(timeout=1)
+        except Exception:
+            pass
 
-        if self.ser:
-            self.ser.close()
+        if self.save_to_csv and hasattr(self, 'csv_thread') and self.csv_thread:
+            print("等待数据写入完成...")
+            try:
+                if hasattr(self, 'csv_queue') and self.csv_queue:
+                    self.csv_queue.join()
+            except Exception:
+                pass
+            try:
+                self.csv_thread.join(timeout=2)
+            except Exception:
+                pass
+
+        try:
+            while True:
+                self.data_queue.get_nowait()
+        except queue.Empty:
+            pass
 
 class STM32DataReader:
     def __init__(self, port, baudrate=921600, save_to_csv=False, csv_dir=None):
@@ -288,7 +312,17 @@ class STM32DataReader:
         if not self.connect():
             return False
         self.running = True
-        if self.save_to_csv and hasattr(self, 'csv_thread'):
+        if self.save_to_csv:
+            self.csv_queue = queue.Queue(maxsize=200000)
+            dir_path = self.csv_dir.strip() if (self.csv_dir and isinstance(self.csv_dir, str)) else os.getcwd()
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+            except Exception as e:
+                print(f"STM32 创建CSV目录失败，改用当前目录: {e}")
+                dir_path = os.getcwd()
+            file_name = f"stm32_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            self.csv_filename = os.path.join(dir_path, file_name)
+            self.csv_thread = threading.Thread(target=self._csv_writer, daemon=True)
             self.csv_thread.start()
         self.thread = threading.Thread(target=self.read_loop, daemon=True)
         self.thread.start()
@@ -308,8 +342,12 @@ class STM32DataReader:
                 self.csv_thread.join(timeout=2)
             except Exception:
                 pass
-        if self.ser:
-            self.ser.close()
+        try:
+            if hasattr(self, 'buffers'):
+                for buf in self.buffers:
+                    buf.clear()
+        except Exception:
+            pass
 
 class RealtimePlotter:
     def __init__(self, data_reader, max_points=1000):
@@ -741,7 +779,6 @@ class App:
                 pass
             self.canvas = None
             self.plotter = None
-            self.reader = None
 
             try:
                 if self.stm32_canvas:
@@ -750,16 +787,10 @@ class App:
                 pass
             self.stm32_canvas = None
             self.stm32_plotter = None
-            self.stm32_reader = None
 
             # 更新状态与UI
             self.is_running = False
-            self.is_connected = False
             self.start_button.configure(text='开始')
-            try:
-                self.connect_button.configure(text='连接')
-            except Exception:
-                pass
             self.port_entry.configure(state='normal')
             self.no_csv_entry.configure(state='normal')
             self.delay_entry.configure(state='normal')
