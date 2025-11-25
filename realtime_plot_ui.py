@@ -61,6 +61,9 @@ class ArduinoDataReader:
     def connect(self):
         """连接Arduino并发送换行符"""
         try:
+            if self.ser and getattr(self.ser, 'is_open', False):
+                print(f"已连接到 {self.port}")
+                return True
             self.ser = serial.Serial(self.port, self.baudrate, timeout=0.01)
             print(f"已连接到 {self.port}")
             return True
@@ -212,6 +215,9 @@ class STM32DataReader:
 
     def connect(self):
         try:
+            if self.ser and getattr(self.ser, 'is_open', False):
+                print(f"STM32 已连接到 {self.port}")
+                return True
             self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
             print(f"STM32 已连接到 {self.port}")
             return True
@@ -505,6 +511,7 @@ class App:
 
         # 状态
         self.is_running = False
+        self.is_connected = False
         self.reader = None
         self.plotter = None
         self.canvas = None
@@ -536,8 +543,10 @@ class App:
         self.delay_entry.insert(0, '4')
 
         # 开始/停止按钮
+        self.connect_button = ttk.Button(control_frame, text='连接', command=self.connect_devices)
+        self.connect_button.grid(row=0, column=6, padx=10)
         self.start_button = ttk.Button(control_frame, text='开始', command=self.toggle_run)
-        self.start_button.grid(row=0, column=6, padx=10)
+        self.start_button.grid(row=1, column=6, padx=10)
 
         # CSV目录输入（新行）
         ttk.Label(control_frame, text='csv_dir').grid(row=1, column=0, sticky='w')
@@ -570,50 +579,114 @@ class App:
     def parse_bool_text(self, s):
         v = (s or '').strip().lower()
         return v in ('1', 'true', 't', 'yes', 'y', 'on')
+    
+    def connect_devices(self):
+        if self.is_running:
+            print('当前正在采集数据，请先停止再重新连接')
+            return
+        self.is_connected = False
+        try:
+            self.connect_button.configure(text='连接')
+        except Exception:
+            pass
+        port = self.port_entry.get().strip()
+        no_csv_text = self.no_csv_entry.get().strip()
+        delay_text = self.delay_entry.get().strip()
+        csv_dir_text = self.csv_dir_entry.get().strip()
+        stm32_port = self.stm32_port_entry.get().strip()
+        if not port:
+            print('错误: port 不能为空')
+            return
+        if not stm32_port:
+            print('错误: stm32_port 不能为空')
+            return
+        no_csv = self.parse_bool_text(no_csv_text)
+        try:
+            delay = int(delay_text) if delay_text else 7
+        except ValueError:
+            print('警告: delay 非法，使用默认 7 秒')
+            delay = 7
+        csv_dir = csv_dir_text if csv_dir_text else None
+        if (self.reader and getattr(self.reader, 'ser', None) and getattr(self.reader.ser, 'is_open', False) and
+                self.stm32_reader and getattr(self.stm32_reader, 'ser', None) and getattr(self.stm32_reader.ser, 'is_open', False)):
+            print('Arduino 和 STM32 已连接，无需重复连接')
+            self.is_connected = True
+            try:
+                self.connect_button.configure(text='已连接')
+            except Exception:
+                pass
+            return
+        self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir)
+        if not self.reader.connect():
+            print('无法连接 Arduino，请检查端口或设备连接')
+            self.reader = None
+            return
+        self.stm32_reader = STM32DataReader(port=stm32_port, save_to_csv=not no_csv, csv_dir=csv_dir)
+        if not self.stm32_reader.connect():
+            print('无法连接 STM32，请检查端口或设备连接')
+            try:
+                if self.reader and getattr(self.reader, 'ser', None):
+                    self.reader.ser.close()
+            except Exception:
+                pass
+            self.reader = None
+            self.stm32_reader = None
+            return
+        self.is_connected = True
+        try:
+            self.connect_button.configure(text='已连接')
+        except Exception:
+            pass
+        print('已成功连接 Arduino 和 STM32，等待开始采集...')
 
     def toggle_run(self):
         if not self.is_running:
-            # 读取参数
-            port = self.port_entry.get().strip()
-            no_csv_text = self.no_csv_entry.get().strip()
-            delay_text = self.delay_entry.get().strip()
-            csv_dir_text = self.csv_dir_entry.get().strip()
-            stm32_port = self.stm32_port_entry.get().strip()
-
-            if not port:
-                print('错误: port 不能为空')
-                return
-            if not stm32_port:
-                print('错误: stm32_port 不能为空')
-                return
-
-            no_csv = self.parse_bool_text(no_csv_text)
-            try:
-                delay = int(delay_text) if delay_text else 7
-            except ValueError:
-                print('警告: delay 非法，使用默认 7 秒')
-                delay = 7
-
-            # 创建并启动数据读取器
-            csv_dir = csv_dir_text if csv_dir_text else None
-            self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir)
-            if not self.reader.start():
-                print('无法启动数据读取，请检查端口或设备连接')
-                self.reader = None
-                return
-
-            # 启动 STM32 数据读取与绘图
-            self.stm32_reader = STM32DataReader(port=stm32_port, save_to_csv=not no_csv, csv_dir=csv_dir)
-            if not self.stm32_reader.start():
-                print('无法启动 STM32 数据读取，请检查端口或设备连接')
-                # 回滚 Arduino 启动
+            if self.reader is not None and self.stm32_reader is not None:
+                if not self.reader.start():
+                    print('无法启动数据读取，请检查端口或设备连接')
+                    return
+                if not self.stm32_reader.start():
+                    print('无法启动 STM32 数据读取，请检查端口或设备连接')
+                    try:
+                        if self.reader:
+                            self.reader.stop()
+                    except Exception:
+                        pass
+                    return
+            else:
+                port = self.port_entry.get().strip()
+                no_csv_text = self.no_csv_entry.get().strip()
+                delay_text = self.delay_entry.get().strip()
+                csv_dir_text = self.csv_dir_entry.get().strip()
+                stm32_port = self.stm32_port_entry.get().strip()
+                if not port:
+                    print('错误: port 不能为空')
+                    return
+                if not stm32_port:
+                    print('错误: stm32_port 不能为空')
+                    return
+                no_csv = self.parse_bool_text(no_csv_text)
                 try:
-                    if self.reader:
-                        self.reader.stop()
-                except Exception:
-                    pass
-                self.reader = None
-                return
+                    delay = int(delay_text) if delay_text else 7
+                except ValueError:
+                    print('警告: delay 非法，使用默认 7 秒')
+                    delay = 7
+                csv_dir = csv_dir_text if csv_dir_text else None
+                self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir)
+                if not self.reader.start():
+                    print('无法启动数据读取，请检查端口或设备连接')
+                    self.reader = None
+                    return
+                self.stm32_reader = STM32DataReader(port=stm32_port, save_to_csv=not no_csv, csv_dir=csv_dir)
+                if not self.stm32_reader.start():
+                    print('无法启动 STM32 数据读取，请检查端口或设备连接')
+                    try:
+                        if self.reader:
+                            self.reader.stop()
+                    except Exception:
+                        pass
+                    self.reader = None
+                    return
 
             # 创建绘图器并嵌入到 Tkinter
             self.plotter = RealtimePlotter(self.reader)
@@ -681,7 +754,12 @@ class App:
 
             # 更新状态与UI
             self.is_running = False
+            self.is_connected = False
             self.start_button.configure(text='开始')
+            try:
+                self.connect_button.configure(text='连接')
+            except Exception:
+                pass
             self.port_entry.configure(state='normal')
             self.no_csv_entry.configure(state='normal')
             self.delay_entry.configure(state='normal')
