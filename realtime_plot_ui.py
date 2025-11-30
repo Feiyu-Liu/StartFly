@@ -363,7 +363,7 @@ class RealtimePlotter:
         self.ax1 = self.fig.add_subplot(3, 1, 1)
         self.ax2 = self.fig.add_subplot(3, 1, 2, sharex=self.ax1)
         self.ax3 = self.fig.add_subplot(3, 1, 3, sharex=self.ax1)
-        self.fig.suptitle('Arduino Real-time Data Monitor')
+        self.fig.suptitle('Real-time Data Monitor')
 
         self.line1, = self.ax1.plot([], [], 'b-', label='Analog (A0)')
         self.ax1.set_ylabel('Analog Value')
@@ -383,7 +383,7 @@ class RealtimePlotter:
         self.ax3.set_ylim(0, 1)
         self.ax3.set_yticks([]) # Hide y-axis ticks
         self.ax3.legend(loc='upper left')
-        
+
     
     def update_plot(self, frame):
         new_data = []
