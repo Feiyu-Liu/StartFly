@@ -17,7 +17,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse as urlparse
 
 class ArduinoDataReader:
-    def __init__(self, port, baudrate=921600, save_to_csv=False, start_delay_s=2, csv_dir=None):
+    def __init__(self, port, baudrate=921600, save_to_csv=False, start_delay_s=2, csv_dir=None, start_trial_ms=12000):
         self.port = port
         self.baudrate = baudrate
         self.ser = None
@@ -25,6 +25,7 @@ class ArduinoDataReader:
         self.running = False
         self.start_delay_s = start_delay_s
         self.csv_dir = csv_dir
+        self.start_trial_ms = start_trial_ms
 
         self.save_to_csv = save_to_csv
         if self.save_to_csv:
@@ -66,6 +67,18 @@ class ArduinoDataReader:
                 return True
             self.ser = serial.Serial(self.port, self.baudrate, timeout=0.01)
             print(f"已连接到 {self.port}")
+            def send_after_connect():
+                try:
+                    print(f"将在 1 秒后发送启动时长(毫秒): {getattr(self, 'start_trial_ms', 12000)}")
+                    time.sleep(2)
+                    value = int(self.start_trial_ms)   # 假设是 12345
+                    msg = f"{value}\n"                 # 加上换行符更可靠
+                    self.ser.write(msg.encode('ascii'))   
+                    # self.ser.write(str(int(getattr(self, 'start_trial_ms', 12000))).encode('ascii'))
+                    print("启动时长已发送。")
+                except Exception as e:
+                    print(f"发送启动时长失败: {e}")
+            threading.Thread(target=send_after_connect, daemon=True).start()
             return True
         except Exception as e:
             print(f"连接失败: {e}")
@@ -140,19 +153,17 @@ class ArduinoDataReader:
             self.read_thread.start()
             print("数据读取、保存和绘图已立即开始...")
 
-            # 启动一个独立的线程来延迟发送换行符
             def delayed_send():
-                print(f"将在 {self.start_delay_s} 秒后发送启动信号 (换行符)...")
-                time.sleep(self.start_delay_s)
-                if self.running and self.ser:
-                    try:
+                try:
+                    print(f"将在 {self.start_delay_s} 秒后发送启动信号 (换行符)...")
+                    time.sleep(self.start_delay_s)
+                    if self.running and self.ser:
                         self.ser.write(b'\n')
                         print("启动信号 (换行符) 已发送。")
-                    except Exception as e:
-                        print(f"发送启动信号失败: {e}")
+                except Exception as e:
+                    print(f"发送启动信号失败: {e}")
 
-            send_thread = threading.Thread(target=delayed_send, daemon=True)
-            send_thread.start()
+            threading.Thread(target=delayed_send, daemon=True).start()
 
             return True
         return False
@@ -581,7 +592,7 @@ class App:
         self.delay_entry.insert(0, '4')
 
         # 开始/停止按钮
-        self.connect_button = ttk.Button(control_frame, text='连接', command=self.connect_devices)
+        self.connect_button = ttk.Button(control_frame, text='连接', command=self.toggle_connect)
         self.connect_button.grid(row=0, column=6, padx=10)
         self.start_button = ttk.Button(control_frame, text='开始', command=self.toggle_run)
         self.start_button.grid(row=1, column=6, padx=10)
@@ -597,6 +608,10 @@ class App:
         self.stm32_port_entry = ttk.Entry(control_frame, width=30)
         self.stm32_port_entry.grid(row=2, column=1, padx=5)
         self.stm32_port_entry.insert(0, 'COM14')
+        ttk.Label(control_frame, text='trial_ms').grid(row=2, column=2, sticky='w')
+        self.trial_ms_entry = ttk.Entry(control_frame, width=10)
+        self.trial_ms_entry.grid(row=2, column=3, padx=5)
+        self.trial_ms_entry.insert(0, '12000')
 
         # 绘图区域：Arduino 在上，STM32 在下
         self.plot_frame = ttk.Frame(self.root)
@@ -618,6 +633,15 @@ class App:
         v = (s or '').strip().lower()
         return v in ('1', 'true', 't', 'yes', 'y', 'on')
     
+    def connect_or_disconnect(self):
+        if not self.is_connected:
+            self.connect_devices()
+        else:
+            if self.is_running:
+                print('当前正在采集数据，请先停止再断开连接')
+                return
+            self.disconnect_devices()
+
     def connect_devices(self):
         if self.is_running:
             print('当前正在采集数据，请先停止再重新连接')
@@ -630,6 +654,7 @@ class App:
         port = self.port_entry.get().strip()
         no_csv_text = self.no_csv_entry.get().strip()
         delay_text = self.delay_entry.get().strip()
+        trial_ms_text = getattr(self, 'trial_ms_entry', None).get().strip() if hasattr(self, 'trial_ms_entry') else ''
         csv_dir_text = self.csv_dir_entry.get().strip()
         stm32_port = self.stm32_port_entry.get().strip()
         if not port:
@@ -650,11 +675,18 @@ class App:
             print('Arduino 和 STM32 已连接，无需重复连接')
             self.is_connected = True
             try:
-                self.connect_button.configure(text='已连接')
+                self.connect_button.configure(text='断开')
+                if hasattr(self, 'trial_ms_entry') and self.trial_ms_entry:
+                    self.trial_ms_entry.configure(state='disabled')
             except Exception:
                 pass
             return
-        self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir)
+        try:
+            trial_ms = int(trial_ms_text) if trial_ms_text else 12000
+        except ValueError:
+            print('警告: trial_ms 非法，使用默认 12000 毫秒')
+            trial_ms = 12000
+        self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir, start_trial_ms=trial_ms)
         if not self.reader.connect():
             print('无法连接 Arduino，请检查端口或设备连接')
             self.reader = None
@@ -672,10 +704,127 @@ class App:
             return
         self.is_connected = True
         try:
-            self.connect_button.configure(text='已连接')
+            self.connect_button.configure(text='断开')
+            if hasattr(self, 'trial_ms_entry') and self.trial_ms_entry:
+                self.trial_ms_entry.configure(state='disabled')
         except Exception:
             pass
         print('已成功连接 Arduino 和 STM32，等待开始采集...')
+
+    def toggle_connect(self):
+        if not self.is_connected:
+            self.connect_devices()
+        else:
+            self.disconnect_devices()
+
+    def disconnect_devices(self):
+        try:
+            if self.is_running:
+                try:
+                    if self.plotter:
+                        self.plotter.stop()
+                except Exception:
+                    pass
+                try:
+                    if self.reader:
+                        self.reader.stop()
+                except Exception:
+                    pass
+                try:
+                    if self.stm32_plotter:
+                        self.stm32_plotter.stop()
+                except Exception:
+                    pass
+                try:
+                    if self.stm32_reader:
+                        self.stm32_reader.stop()
+                except Exception:
+                    pass
+                try:
+                    if self.canvas:
+                        self.canvas.get_tk_widget().destroy()
+                except Exception:
+                    pass
+                self.canvas = None
+                self.plotter = None
+                try:
+                    if self.stm32_canvas:
+                        self.stm32_canvas.get_tk_widget().destroy()
+                except Exception:
+                    pass
+                self.stm32_canvas = None
+                self.stm32_plotter = None
+                self.is_running = False
+                try:
+                    self.start_button.configure(text='开始')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            if self.reader and getattr(self.reader, 'ser', None):
+                try:
+                    self.reader.ser.close()
+                except Exception:
+                    pass
+            self.reader = None
+        except Exception:
+            pass
+        try:
+            if self.stm32_reader and getattr(self.stm32_reader, 'ser', None):
+                try:
+                    self.stm32_reader.ser.close()
+                except Exception:
+                    pass
+            self.stm32_reader = None
+        except Exception:
+            pass
+
+        self.is_connected = False
+        try:
+            self.connect_button.configure(text='连接')
+        except Exception:
+            pass
+        try:
+            self.port_entry.configure(state='normal')
+            self.no_csv_entry.configure(state='normal')
+            self.delay_entry.configure(state='normal')
+            if hasattr(self, 'trial_ms_entry') and self.trial_ms_entry:
+                self.trial_ms_entry.configure(state='normal')
+            self.csv_dir_entry.configure(state='normal')
+            self.stm32_port_entry.configure(state='normal')
+        except Exception:
+            pass
+        print('已断开 Arduino 和 STM32 连接，trial_ms 可编辑')
+
+    def disconnect_devices(self):
+        try:
+            if self.reader and getattr(self.reader, 'ser', None):
+                try:
+                    if getattr(self.reader.ser, 'is_open', False):
+                        self.reader.ser.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if self.stm32_reader and getattr(self.stm32_reader, 'ser', None):
+                try:
+                    if getattr(self.stm32_reader.ser, 'is_open', False):
+                        self.stm32_reader.ser.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.reader = None
+        self.stm32_reader = None
+        self.is_connected = False
+        try:
+            self.connect_button.configure(text='连接')
+        except Exception:
+            pass
+        print('已断开 Arduino 和 STM32 连接')
 
     def toggle_run(self):
         if not self.is_running:
@@ -695,6 +844,7 @@ class App:
                 port = self.port_entry.get().strip()
                 no_csv_text = self.no_csv_entry.get().strip()
                 delay_text = self.delay_entry.get().strip()
+                trial_ms_text = getattr(self, 'trial_ms_entry', None).get().strip() if hasattr(self, 'trial_ms_entry') else ''
                 csv_dir_text = self.csv_dir_entry.get().strip()
                 stm32_port = self.stm32_port_entry.get().strip()
                 if not port:
@@ -710,7 +860,12 @@ class App:
                     print('警告: delay 非法，使用默认 7 秒')
                     delay = 7
                 csv_dir = csv_dir_text if csv_dir_text else None
-                self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir)
+                try:
+                    trial_ms = int(trial_ms_text) if trial_ms_text else 12000
+                except ValueError:
+                    print('警告: trial_ms 非法，使用默认 12000 毫秒')
+                    trial_ms = 12000
+                self.reader = ArduinoDataReader(port=port, save_to_csv=not no_csv, start_delay_s=delay, csv_dir=csv_dir, start_trial_ms=trial_ms)
                 if not self.reader.start():
                     print('无法启动数据读取，请检查端口或设备连接')
                     self.reader = None
@@ -746,6 +901,8 @@ class App:
             self.port_entry.configure(state='disabled')
             self.no_csv_entry.configure(state='disabled')
             self.delay_entry.configure(state='disabled')
+            if hasattr(self, 'trial_ms_entry') and self.trial_ms_entry:
+                self.trial_ms_entry.configure(state='disabled')
             self.csv_dir_entry.configure(state='disabled')
             self.stm32_port_entry.configure(state='disabled')
         else:

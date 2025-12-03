@@ -36,6 +36,8 @@ enum MagnetState { IDLE, FIRING };
 MagnetState magnetState = IDLE;
 unsigned long fireStart = 0;
 
+unsigned long trialDur = TRIAL_DUR;
+
 unsigned long startTrialTime = 0;
 bool isSyncPinHigh = false;
 unsigned long syncPinHighStartTime = 0;
@@ -72,6 +74,13 @@ void setup() {
   pinMode(MAGNET_TTL_PIN, OUTPUT); // 磁铁触发输出
   digitalWrite(MAGNET_TTL_PIN, LOW);
   digitalWrite(SYNC_TTL_PIN, LOW);
+
+  // 等待加载设置
+  while (!Serial.available()) {};
+  trialDur = Serial.parseInt();
+
+  isStart = true;
+
 
   // ---- ADC 初始化 ----
   ADMUX = (1 << REFS0);                 // AVcc 参考电压
@@ -112,7 +121,7 @@ void loop() {
     syncPinHighStartTime = millis();
     // delay(10);
     // digitalWrite(SYNC_TTL_PIN, LOW);
-  } else if (isStart && (millis() - startTrialTime) > TRIAL_DUR) {
+  } else if (isStart && (millis() - startTrialTime) > trialDur) {
     isStart = false;
   }
 

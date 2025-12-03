@@ -198,10 +198,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.arduino_timer = QtCore.QTimer(self)
             self.arduino_timer.timeout.connect(self._update_arduino_plot)
-            self.arduino_timer.start(20)
+            self.arduino_timer.start(10)
             self.stm32_timer = QtCore.QTimer(self)
             self.stm32_timer.timeout.connect(self._update_stm32_plot)
-            self.stm32_timer.start(50)
+            self.stm32_timer.start(10)
             self.is_running = True
             self.start_btn.setText('停止')
             self.port_edit.setEnabled(False)
